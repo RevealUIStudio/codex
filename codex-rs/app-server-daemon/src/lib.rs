@@ -418,11 +418,24 @@ impl Daemon {
                 info,
             )
         } else if self.running_backend_instance(&settings).await?.is_some() {
+            let info = match self.wait_until_ready().await {
+                Ok(info) => info,
+                Err(err) => {
+                    #[cfg(unix)]
+                    if control_socket_is_missing(&self.socket_path) {
+                        self.diagnostic(format_args!(
+                            "managed app-server is alive but its control socket is missing; restarting it"
+                        ));
+                        return self.restart_with_settings(settings).await;
+                    }
+                    return Err(err);
+                }
+            };
             (
                 LifecycleStatus::AlreadyRunning,
                 Some(BackendKind::Pid),
                 None,
-                self.wait_until_ready().await?,
+                info,
             )
         } else {
             // A fresh start must ignore snapshots left by older stop clients.
@@ -1104,6 +1117,14 @@ impl Daemon {
     }
 }
 
+#[cfg(unix)]
+fn control_socket_is_missing(socket_path: &Path) -> bool {
+    matches!(
+        std::fs::metadata(socket_path),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
 fn remote_control_status(mode: RemoteControlMode) -> RemoteControlStatus {
     match mode {
         RemoteControlMode::Enabled => RemoteControlStatus::Enabled,
@@ -1164,6 +1185,8 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    use super::BTreeMap;
     use super::BackendKind;
     use super::BootstrapOutput;
     use super::BootstrapStatus;
@@ -1385,6 +1408,71 @@ mod tests {
             .await
             .expect_err("missing backend binary");
         assert!(!daemon.recovery_file().expect("recovery path").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_control_socket_includes_broken_rendezvous_symlink() {
+        let home = TempDir::new().expect("home");
+        let rendezvous = home.path().join("app-server-control.sock");
+        let target = home.path().join("private.sock");
+        std::os::unix::fs::symlink(&target, &rendezvous).expect("rendezvous link");
+        assert!(super::control_socket_is_missing(&rendezvous));
+
+        let listener = std::os::unix::net::UnixListener::bind(&target).expect("control socket");
+        assert!(!super::control_socket_is_missing(&rendezvous));
+        drop(listener);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn start_replaces_alive_managed_backend_after_socket_disappears() {
+        let home = TempDir::new().expect("home");
+        let standalone = home.path().join("packages/standalone");
+        let local_bin = standalone.join("local-main/bin/codex");
+        tokio::fs::create_dir_all(local_bin.parent().expect("bin parent"))
+            .await
+            .expect("local bin directory");
+        codex_utils_cargo_bin::write_executable(&local_bin, "#!/bin/sh\nexec sleep 60\n")
+            .expect("local bin");
+        std::os::unix::fs::symlink("local-main", standalone.join("current"))
+            .expect("current local build");
+        let state = home.path().join("app-server-daemon");
+        let daemon = Daemon {
+            log_diagnostics: false,
+            socket_path: home
+                .path()
+                .join("app-server-control/app-server-control.sock"),
+            pid_file: state.join("app-server.pid"),
+            update_pid_file: state.join("app-server-updater.pid"),
+            operation_lock_file: state.join("daemon.lock"),
+            settings_file: state.join("settings.json"),
+            managed_codex_bin: standalone.join("current/bin/codex"),
+        };
+        let settings = DaemonSettings::default();
+        let backend = crate::backend::pid_backend(daemon.backend_paths(&settings));
+        let old_pid = backend
+            .start()
+            .await
+            .expect("start old backend")
+            .expect("old pid");
+        std::fs::create_dir_all(daemon.socket_path.parent().expect("socket parent"))
+            .expect("socket directory");
+        std::os::unix::fs::symlink(home.path().join("missing.sock"), &daemon.socket_path)
+            .expect("broken control link");
+
+        let result = daemon.start(&BTreeMap::new()).await;
+        let new_pid = std::fs::read(&daemon.pid_file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|record| record.get("pid").and_then(serde_json::Value::as_u64));
+        backend.stop().await.expect("stop replacement backend");
+
+        assert!(
+            result.is_err(),
+            "fake backend never creates a control socket"
+        );
+        assert_ne!(new_pid, Some(u64::from(old_pid)));
     }
 
     #[cfg(unix)]
