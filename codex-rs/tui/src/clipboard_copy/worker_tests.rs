@@ -12,6 +12,68 @@ use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
 use std::time::Duration;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn timed_out_writer_releases_worker_for_the_next_copy() {
+    let (draws, _) = tokio::sync::broadcast::channel(/*capacity*/ 1);
+    let frames = FrameRequester::new(draws);
+    let mut worker = ClipboardWorker::default();
+    let mut first = true;
+    worker
+        .start(
+            frames.clone(),
+            move |text, _, setup| {
+                setup.begin_delivery().unwrap();
+                let mut command = tokio::process::Command::new(if first { "sleep" } else { "cat" });
+                let budget = if first {
+                    Duration::from_millis(/*millis*/ 100)
+                } else {
+                    Duration::from_secs(/*secs*/ 2)
+                };
+                if first {
+                    command.arg("60");
+                }
+                first = false;
+                let result = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(crate::clipboard_copy::write_clipboard_command(
+                        command,
+                        text,
+                        Instant::now() + budget,
+                    ));
+                (result.map(|()| CopyOutcome::Copied(None)), None)
+            },
+            |_| unreachable!("copy-only fixture"),
+        )
+        .unwrap();
+    for expected in [
+        Err("clipboard write timed out".into()),
+        Ok(CopyStatus::Confirmed),
+    ] {
+        let Ok(CopyStatus::Pending(id)) =
+            worker.copy("text".into(), CopyFormat::PlainText, frames.clone())
+        else {
+            panic!("previous copy must not leave the worker busy");
+        };
+        let result = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
+            loop {
+                if let Some((completed_id, result)) = worker.poll()
+                    && *completed_id == id
+                {
+                    break result.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(/*millis*/ 5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, expected);
+        assert!(!worker.is_busy());
+    }
+}
+
 #[tokio::test]
 async fn blocked_copy_allows_overlay_exit_rejects_backlog_and_wakes_completion() {
     let mut tui = crate::tui::test_support::make_test_tui().unwrap();
