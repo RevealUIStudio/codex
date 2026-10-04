@@ -41,7 +41,9 @@ runner group or BuildBuddy secret and retains runtime test-helper setup.
 For clipboard validation, select package `codex-tui` and nextest expression
 `test(clipboard_copy)`. The archive still compiles that package's complete test
 binaries, including worker integration tests. Inspect the shard reports and test
-counts to confirm the intended tests ran.
+counts to confirm the intended tests ran. Archive-backed shards extract into an
+explicit runner-temporary directory that survives nextest exit; JUnit uploads
+read its remapped target directory and fail when the report is missing.
 
 Selected runs do not emit `Full CI results` and do not satisfy the normal full
 cross-platform gates. Leave both inputs empty for the unchanged full suite.
