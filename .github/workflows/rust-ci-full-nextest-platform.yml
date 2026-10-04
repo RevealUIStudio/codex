@@ -295,7 +295,7 @@ jobs:
       CODEX_CI_TARGET: ${{ inputs.target }}
       CODEX_CI_TEST_THREADS: ${{ inputs.test_threads }}
       CODEX_CI_TEST_FILTER: ${{ inputs.test_filter }}
-      NEXTEST_EXTRACT_DIR: ${{ runner.temp }}/nextest-extracted
+      NEXTEST_EXTRACT_DIR: nextest-extracted
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
       TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}
     strategy:
@@ -360,7 +360,7 @@ jobs:
           set -euo pipefail
           archive_file="${RUNNER_TEMP}/nextest-archive/${NEXTEST_ARCHIVE_FILE}"
           workspace_root="$(pwd)"
-          extract_dir="${NEXTEST_EXTRACT_DIR}"
+          extract_dir="${RUNNER_TEMP}/${NEXTEST_EXTRACT_DIR}"
 
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             archive_file="$(cygpath -w "${archive_file}")"
@@ -428,7 +428,7 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: nextest-junit-rust-ci-${{ inputs.artifact_id }}-shard-${{ matrix.shard }}
-          path: ${{ env.NEXTEST_EXTRACT_DIR }}/target/nextest/default/junit.xml
+          path: ${{ runner.temp }}/${{ env.NEXTEST_EXTRACT_DIR }}/target/nextest/default/junit.xml
           if-no-files-found: error
 
       - name: Tear down remote test env
