@@ -95,14 +95,18 @@ pub async fn start_control_socket_acceptor(
     };
     prepare_control_socket_path(socket_path.as_path()).await?;
     let listener = UnixListener::bind(socket_path.as_path()).await?;
+    set_control_socket_permissions(socket_path.as_path()).await?;
+    #[cfg(unix)]
+    let initial_socket_identity = socket_identity(socket_path.as_path())?;
     let socket_guard = ControlSocketFileGuard {
         socket_path,
         #[cfg(unix)]
         rendezvous_path,
+        #[cfg(unix)]
+        socket_identity: initial_socket_identity,
         #[cfg(windows)]
         _directory_guard: directory_guard,
     };
-    set_control_socket_permissions(socket_guard.socket_path.as_path()).await?;
     #[cfg(unix)]
     std::os::unix::fs::symlink(
         socket_guard.socket_path.as_path(),
@@ -129,11 +133,27 @@ async fn run_control_socket_acceptor(
     socket_guard: ControlSocketFileGuard,
     daemon_shutdown_access: DaemonShutdownAccess,
 ) {
+    #[cfg(unix)]
+    let mut socket_guard = socket_guard;
+    #[cfg(windows)]
     let _socket_guard = socket_guard;
+    #[cfg(unix)]
+    let mut socket_check = tokio::time::interval(Duration::from_secs(2));
     loop {
+        #[cfg(unix)]
+        let socket_check_future = socket_check.tick();
+        #[cfg(windows)]
+        let socket_check_future = std::future::pending::<()>();
         let stream = tokio::select! {
             _ = shutdown_token.cancelled() => {
                 break;
+            }
+            _ = socket_check_future => {
+                #[cfg(unix)]
+                if let Err(err) = restore_control_socket(&mut listener, &mut socket_guard).await {
+                    warn!(%err, "failed to restore app-server control socket");
+                }
+                continue;
             }
             result = listener.accept() => {
                 match result {
@@ -204,6 +224,68 @@ async fn run_control_socket_acceptor(
         });
     }
     info!("control socket acceptor shutting down");
+}
+
+#[cfg(unix)]
+fn socket_identity(path: &Path) -> IoResult<(u64, u64)> {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.file_type().is_socket() {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "app-server control path is not a socket",
+        ));
+    }
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(unix)]
+async fn restore_control_socket(
+    listener: &mut UnixListener,
+    guard: &mut ControlSocketFileGuard,
+) -> IoResult<()> {
+    let physical_path = guard.socket_path.as_path();
+    let rendezvous_path = guard.rendezvous_path.as_path();
+    let physical_missing = socket_identity(physical_path).ok() != Some(guard.socket_identity);
+    let alias_missing = std::fs::read_link(rendezvous_path).ok().as_deref() != Some(physical_path);
+    if !physical_missing && !alias_missing {
+        return Ok(());
+    }
+
+    // The same lock serializes initial bind and recovery across daemon starts.
+    codex_uds::prepare_shared_daemon_socket_directory()?;
+    let _lock = acquire_app_server_startup_lock(AbsolutePathBuf::from_absolute_path_checked(
+        physical_path.with_extension("lock"),
+    )?)
+    .await?;
+    if let Ok(identity) = socket_identity(physical_path)
+        && identity != guard.socket_identity
+    {
+        return Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            "another app-server owns the control socket",
+        ));
+    }
+    if socket_identity(physical_path).ok() != Some(guard.socket_identity) {
+        prepare_control_socket_path(physical_path).await?;
+        let replacement = UnixListener::bind(physical_path).await?;
+        set_control_socket_permissions(physical_path).await?;
+        guard.socket_identity = socket_identity(physical_path)?;
+        *listener = replacement;
+        info!(socket_path = %physical_path.display(), "app-server control socket rebound");
+    }
+    match std::fs::read_link(rendezvous_path) {
+        Ok(target) if target == physical_path => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            std::os::unix::fs::symlink(physical_path, rendezvous_path)
+        }
+        _ => Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            "app-server control socket rendezvous path was replaced",
+        )),
+    }
 }
 
 async fn run_daemon_shutdown(
@@ -339,6 +421,8 @@ struct ControlSocketFileGuard {
     socket_path: AbsolutePathBuf,
     #[cfg(unix)]
     rendezvous_path: AbsolutePathBuf,
+    #[cfg(unix)]
+    socket_identity: (u64, u64),
     // Keep the directory pinned until after the socket file is removed in Drop.
     #[cfg(windows)]
     _directory_guard: std::os::windows::io::OwnedHandle,
@@ -347,12 +431,20 @@ struct ControlSocketFileGuard {
 impl Drop for ControlSocketFileGuard {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if std::fs::read_link(self.rendezvous_path.as_path())
-            .ok()
-            .as_deref()
-            == Some(self.socket_path.as_path())
+        let still_owns_socket =
+            socket_identity(self.socket_path.as_path()).ok() == Some(self.socket_identity);
+        #[cfg(unix)]
+        if still_owns_socket
+            && std::fs::read_link(self.rendezvous_path.as_path())
+                .ok()
+                .as_deref()
+                == Some(self.socket_path.as_path())
         {
             let _ = std::fs::remove_file(self.rendezvous_path.as_path());
+        }
+        #[cfg(unix)]
+        if !still_owns_socket {
+            return;
         }
         if let Err(err) = std::fs::remove_file(self.socket_path.as_path())
             && err.kind() != ErrorKind::NotFound

@@ -97,6 +97,79 @@ async fn long_control_socket_paths_connect_to_distinct_daemons() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn lost_physical_socket_recovers_without_dropping_existing_or_concurrent_clients() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let socket_path = test_socket_path(temp_dir.path());
+    let (tx, _rx) = mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
+    let shutdown = CancellationToken::new();
+    let acceptor = start_control_socket_acceptor(
+        socket_path.clone(),
+        tx,
+        shutdown.clone(),
+        DaemonShutdownAccess::Disabled,
+    )
+    .await
+    .expect("acceptor");
+
+    let stream = connect_to_socket(socket_path.as_path())
+        .await
+        .expect("initial client");
+    let (mut existing, _) = client_async("ws://localhost/rpc", stream)
+        .await
+        .expect("initial websocket");
+    let physical_path = std::fs::read_link(socket_path.as_path()).expect("physical path");
+    std::fs::remove_file(&physical_path).expect("simulate temp cleanup");
+
+    let clients = timeout(
+        Duration::from_secs(8),
+        futures::future::join_all((0..4).map(|_| async {
+            loop {
+                if let Ok(stream) = connect_to_socket(socket_path.as_path()).await {
+                    break stream;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })),
+    )
+    .await
+    .expect("four clients reconnect after socket loss");
+    assert_eq!(clients.len(), 4);
+    assert!(physical_path.exists());
+
+    std::fs::remove_file(socket_path.as_path()).expect("simulate rendezvous cleanup");
+    timeout(Duration::from_secs(8), async {
+        loop {
+            if let Ok(stream) = connect_to_socket(socket_path.as_path()).await {
+                break stream;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("rendezvous is republished");
+
+    existing
+        .send(WebSocketMessage::Ping(Bytes::from_static(b"still-open")))
+        .await
+        .expect("existing connection remains writable");
+    let pong = timeout(Duration::from_secs(1), existing.next())
+        .await
+        .expect("existing connection responds")
+        .expect("existing frame")
+        .expect("valid frame");
+    assert_eq!(
+        pong,
+        WebSocketMessage::Pong(Bytes::from_static(b"still-open"))
+    );
+
+    drop(clients);
+    shutdown.cancel();
+    acceptor.await.expect("acceptor shutdown");
+    assert_socket_path_removed(socket_path.as_path());
+}
+
 #[tokio::test]
 async fn control_socket_acceptor_upgrades_and_forwards_websocket_text_messages_and_pings() {
     let temp_dir = tempfile::TempDir::new().expect("temp dir");
