@@ -131,8 +131,7 @@ jobs:
         if: ${{ env.USE_SCCACHE == 'true' }}
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: sccache
-          version: 0.7.5
+          tool: sccache@0.7.5
 
       - name: Configure sccache backend
         if: ${{ env.USE_SCCACHE == 'true' }}
@@ -173,8 +172,7 @@ jobs:
 
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: nextest
-          version: 0.9.103
+          tool: nextest@0.9.111
 
       - name: Build nextest archive
         shell: bash
@@ -295,7 +293,6 @@ jobs:
       CODEX_CI_TARGET: ${{ inputs.target }}
       CODEX_CI_TEST_THREADS: ${{ inputs.test_threads }}
       CODEX_CI_TEST_FILTER: ${{ inputs.test_filter }}
-      NEXTEST_EXTRACT_DIR: nextest-extracted
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
       TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}
     strategy:
@@ -325,8 +322,7 @@ jobs:
 
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: nextest
-          version: 0.9.103
+          tool: nextest@0.9.111
 
       - name: Set up remote test env (Docker)
         if: ${{ runner.os == 'Linux' && inputs.remote_env }}
@@ -360,13 +356,10 @@ jobs:
           set -euo pipefail
           archive_file="${RUNNER_TEMP}/nextest-archive/${NEXTEST_ARCHIVE_FILE}"
           workspace_root="$(pwd)"
-          extract_dir="${RUNNER_TEMP}/${NEXTEST_EXTRACT_DIR}"
-          mkdir -p "${extract_dir}"
 
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             archive_file="$(cygpath -w "${archive_file}")"
             workspace_root="$(cygpath -w "${workspace_root}")"
-            extract_dir="$(cygpath -w "${extract_dir}")"
           fi
 
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
@@ -387,7 +380,6 @@ jobs:
             run
             --no-fail-fast
             --archive-file "${archive_file}"
-            --extract-to "${extract_dir}"
             --workspace-remap "${workspace_root}"
             --partition "hash:${{ matrix.shard }}/4"
           )
@@ -429,7 +421,8 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: nextest-junit-rust-ci-${{ inputs.artifact_id }}-shard-${{ matrix.shard }}
-          path: ${{ runner.temp }}/${{ env.NEXTEST_EXTRACT_DIR }}/target/nextest/default/junit.xml
+          # JUnit uses the remapped workspace store, not the extracted binary target.
+          path: ${{ github.workspace }}/codex-rs/target/nextest/default/junit.xml
           if-no-files-found: error
 
       - name: Tear down remote test env
