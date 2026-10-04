@@ -361,6 +361,7 @@ jobs:
           archive_file="${RUNNER_TEMP}/nextest-archive/${NEXTEST_ARCHIVE_FILE}"
           workspace_root="$(pwd)"
           extract_dir="${RUNNER_TEMP}/${NEXTEST_EXTRACT_DIR}"
+          mkdir -p "${extract_dir}"
 
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             archive_file="$(cygpath -w "${archive_file}")"
