@@ -30,6 +30,22 @@ The workflows in this directory are split so that pull requests get fast, review
   - cross-platform `argument-comment-lint`
   - Linux remote-env tests
 
+## Selected Manual Linux Tests
+
+`rust-ci-full.yml` accepts optional `cargo_package` and `test_filter` dispatch
+inputs. Setting either runs selected tests on GitHub's hosted Ubuntu runner
+through the existing archive-backed nextest workflow. The inputs are passed as
+quoted arguments; they are not shell commands. This mode needs no private
+runner group or BuildBuddy secret and retains runtime test-helper setup.
+
+For clipboard validation, select package `codex-tui` and nextest expression
+`test(clipboard_copy)`. The archive still compiles that package's complete test
+binaries, including worker integration tests. Inspect the shard reports and test
+counts to confirm the intended tests ran.
+
+Selected runs do not emit `Full CI results` and do not satisfy the normal full
+cross-platform gates. Leave both inputs empty for the unchanged full suite.
+
 ## Rule Of Thumb
 
 - If a build/test/clippy check can be expressed in Bazel, prefer putting the PR-time version in `bazel.yml`.

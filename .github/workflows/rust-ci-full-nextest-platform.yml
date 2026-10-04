@@ -43,6 +43,16 @@ on:
         required: false
         default: 0
         type: number
+      cargo_package:
+        description: Optional Cargo package; empty builds the normal workspace archive.
+        required: false
+        default: ""
+        type: string
+      test_filter:
+        description: Optional nextest filter expression; empty runs all archived tests.
+        required: false
+        default: ""
+        type: string
       use_sccache:
         required: false
         default: false
@@ -64,6 +74,7 @@ jobs:
       USE_SCCACHE: ${{ inputs.use_sccache && 'true' || 'false' }}
       CODEX_CI_PROFILE: ${{ inputs.profile }}
       CODEX_CI_TARGET: ${{ inputs.target }}
+      CODEX_CI_PACKAGE: ${{ inputs.cargo_package }}
       CARGO_INCREMENTAL: "0"
       SCCACHE_CACHE_SIZE: 10G
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
@@ -171,11 +182,17 @@ jobs:
           set -euo pipefail
           archive_dir="${RUNNER_TEMP}/nextest-archive"
           mkdir -p "${archive_dir}"
-          cargo nextest archive \
-            --target "${CODEX_CI_TARGET}" \
-            --cargo-profile "${CODEX_CI_PROFILE}" \
-            --timings \
+          archive_args=(
+            --locked
+            --target "${CODEX_CI_TARGET}"
+            --cargo-profile "${CODEX_CI_PROFILE}"
+            --timings
             --archive-file "${archive_dir}/${NEXTEST_ARCHIVE_FILE}"
+          )
+          if [[ -n "${CODEX_CI_PACKAGE}" ]]; then
+            archive_args+=(--package "${CODEX_CI_PACKAGE}")
+          fi
+          cargo nextest archive "${archive_args[@]}"
 
       - name: Build runtime test helpers
         if: ${{ runner.os == 'Linux' || runner.os == 'Windows' }}
@@ -277,6 +294,7 @@ jobs:
       CODEX_CI_PROFILE: ${{ inputs.profile }}
       CODEX_CI_TARGET: ${{ inputs.target }}
       CODEX_CI_TEST_THREADS: ${{ inputs.test_threads }}
+      CODEX_CI_TEST_FILTER: ${{ inputs.test_filter }}
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
       TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}
     strategy:
@@ -368,6 +386,9 @@ jobs:
             --workspace-remap "${workspace_root}"
             --partition "hash:${{ matrix.shard }}/4"
           )
+          if [[ -n "${CODEX_CI_TEST_FILTER}" ]]; then
+            nextest_args+=(--filter-expr "${CODEX_CI_TEST_FILTER}")
+          fi
           if [[ "${CODEX_CI_TEST_THREADS}" != "0" ]]; then
             nextest_args+=(--test-threads "${CODEX_CI_TEST_THREADS}")
           fi
