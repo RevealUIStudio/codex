@@ -11,6 +11,7 @@ use anyhow::anyhow;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -153,26 +154,64 @@ pub(crate) async fn managed_codex_version(codex_bin: &Path) -> Result<String> {
     let mut command = Command::new(codex_bin);
     #[cfg(windows)]
     command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    let output = command
+    let mut child = command
         .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .kill_on_drop(true)
-        .output()
-        .await
+        .spawn()
         .with_context(|| {
             format!(
                 "failed to invoke managed Codex binary {}",
                 codex_bin.display()
             )
         })?;
-    if !output.status.success() {
+    let stdout = child
+        .stdout
+        .take()
+        .context("managed version stdout is missing")?;
+    let result = timeout(Duration::from_secs(5), async {
+        let read_stdout = async {
+            let mut bytes = Vec::new();
+            stdout.take(4097).read_to_end(&mut bytes).await?;
+            anyhow::ensure!(
+                bytes.len() <= 4096,
+                "managed Codex version output exceeded 4096 bytes"
+            );
+            Ok::<_, anyhow::Error>(bytes)
+        };
+        tokio::try_join!(
+            async { child.wait().await.map_err(anyhow::Error::from) },
+            read_stdout
+        )
+    })
+    .await;
+    let (status, stdout) = match result {
+        Ok(Ok(output)) => output,
+        failure => {
+            child
+                .kill()
+                .await
+                .context("failed to stop and reap managed version probe")?;
+            return match failure {
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err(anyhow!(
+                    "managed Codex version probe timed out after 5 seconds"
+                )),
+                Ok(Ok(_)) => unreachable!(),
+            };
+        }
+    };
+    if !status.success() {
         return Err(anyhow!(
             "managed Codex binary {} exited with status {}",
             codex_bin.display(),
-            output.status
+            status
         ));
     }
 
-    let stdout = String::from_utf8(output.stdout).with_context(|| {
+    let stdout = String::from_utf8(stdout).with_context(|| {
         format!(
             "managed Codex version was not utf-8: {}",
             codex_bin.display()

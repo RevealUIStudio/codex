@@ -172,13 +172,7 @@ async fn prepare_from_package(
             source: source.to_path_buf(),
             version: version.clone(),
             destination: root.clone(),
-            installed_version: tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                managed_install::managed_codex_version(&selected),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok),
+            installed_version: managed_install::managed_codex_version(&selected).await.ok(),
             restart_required: backend.is_some(),
         })? {
             return Ok(false);

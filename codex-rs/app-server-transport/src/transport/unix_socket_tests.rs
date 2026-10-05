@@ -382,6 +382,89 @@ async fn app_server_startup_lock_serializes_waiters() {
         .expect("second startup lock should succeed");
 }
 
+#[test]
+fn app_server_startup_lock_timeout_does_not_keep_runtime_alive() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let lock_path = test_startup_lock_path(temp_dir.path());
+    std::fs::create_dir_all(lock_path.as_path().parent().expect("lock parent"))
+        .expect("lock directory");
+    let holder = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path.as_path())
+        .expect("lock file");
+    holder.lock().expect("hold startup lock");
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            assert!(
+                timeout(
+                    Duration::from_millis(100),
+                    acquire_app_server_startup_lock(lock_path),
+                )
+                .await
+                .is_err()
+            );
+        });
+        drop(runtime);
+        finished_tx.send(()).expect("runtime stopped");
+    });
+    let stopped_while_contended = finished_rx.recv_timeout(Duration::from_secs(2));
+    // Always release the holder before asserting so the failure control also
+    // joins its thread and leaves no blocked background task behind.
+    drop(holder);
+    waiter.join().expect("waiter thread");
+    assert!(
+        stopped_while_contended.is_ok(),
+        "a timed-out lock waiter must not prevent runtime shutdown"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn control_socket_recovery_can_shutdown_while_startup_lock_is_held() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let socket_path = test_socket_path(temp_dir.path());
+    let (tx, _rx) = mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
+    let shutdown = CancellationToken::new();
+    let mut acceptor = start_control_socket_acceptor(
+        socket_path.clone(),
+        tx,
+        shutdown.clone(),
+        DaemonShutdownAccess::Disabled,
+    )
+    .await
+    .expect("acceptor");
+    let physical_path = std::fs::read_link(socket_path.as_path()).expect("physical path");
+    let holder = acquire_app_server_startup_lock(
+        AbsolutePathBuf::from_absolute_path_checked(physical_path.with_extension("lock"))
+            .expect("lock path"),
+    )
+    .await
+    .expect("hold startup lock");
+    std::fs::remove_file(&physical_path).expect("simulate socket loss");
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    shutdown.cancel();
+    let stopped_while_contended = timeout(Duration::from_secs(1), &mut acceptor).await;
+    drop(holder);
+    if stopped_while_contended.is_err() {
+        timeout(Duration::from_secs(3), acceptor)
+            .await
+            .expect("acceptor exits after releasing failure-control lock")
+            .expect("acceptor task");
+    }
+    assert!(
+        matches!(stopped_while_contended, Ok(Ok(()))),
+        "socket recovery must honor shutdown while another starter holds the lock"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn control_socket_rejects_writable_parent_without_changing_permissions() {

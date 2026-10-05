@@ -150,7 +150,10 @@ async fn run_control_socket_acceptor(
             }
             _ = socket_check_future => {
                 #[cfg(unix)]
-                if let Err(err) = restore_control_socket(&mut listener, &mut socket_guard).await {
+                if let Err(err) = tokio::select! {
+                    _ = shutdown_token.cancelled() => break,
+                    result = restore_control_socket(&mut listener, &mut socket_guard) => result,
+                } {
                     warn!(%err, "failed to restore app-server control socket");
                 }
                 continue;
@@ -387,18 +390,28 @@ pub async fn acquire_app_server_startup_lock(
     if let Some(parent) = startup_lock_path.as_path().parent() {
         codex_uds::prepare_private_socket_directory(parent).await?;
     }
-    tokio::task::spawn_blocking(move || {
-        let file = OpenOptions::new()
+    let file = tokio::task::spawn_blocking(move || {
+        OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(startup_lock_path.as_path())?;
-        file.lock()?;
-        Ok(AppServerStartupLock { _file: file })
+            .open(startup_lock_path.as_path())
     })
     .await
-    .map_err(|err| std::io::Error::other(format!("startup lock task failed: {err}")))?
+    .map_err(|err| std::io::Error::other(format!("startup lock task failed: {err}")))??;
+    // A blocking lock in spawn_blocking survives cancellation of its caller
+    // and keeps Tokio runtime shutdown waiting for another process indefinitely.
+    // Retain the same OS lock, but let a timed-out waiter drop its file handle.
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(AppServerStartupLock { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(std::fs::TryLockError::Error(err)) => return Err(err),
+        }
+    }
 }
 
 #[cfg(unix)]
