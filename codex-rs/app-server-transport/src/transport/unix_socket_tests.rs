@@ -386,16 +386,14 @@ async fn app_server_startup_lock_serializes_waiters() {
 fn app_server_startup_lock_timeout_does_not_keep_runtime_alive() {
     let temp_dir = tempfile::TempDir::new().expect("temp dir");
     let lock_path = test_startup_lock_path(temp_dir.path());
-    std::fs::create_dir_all(lock_path.as_path().parent().expect("lock parent"))
-        .expect("lock directory");
-    let holder = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path.as_path())
-        .expect("lock file");
-    holder.lock().expect("hold startup lock");
+    let holder_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("holder runtime");
+    let holder = holder_runtime
+        .block_on(acquire_app_server_startup_lock(lock_path.clone()))
+        .expect("hold startup lock with the platform's private directory permissions");
+    drop(holder_runtime);
     let (finished_tx, finished_rx) = std::sync::mpsc::channel();
     let waiter = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
