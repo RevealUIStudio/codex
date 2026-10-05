@@ -4,6 +4,8 @@ use serde::Deserialize;
 pub(super) const REMOTE_CONTROL_HOST_DEVICE_KIND_HEADER: &str = "x-codex-host-device-kind";
 #[cfg(any(target_os = "macos", test))]
 const MAC_MINI_HOST_DEVICE_KIND: &str = "mac_mini";
+#[cfg(any(target_os = "macos", test))]
+pub(super) const HOST_DEVICE_KIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[cfg(any(target_os = "macos", test))]
 #[derive(Deserialize)]
@@ -31,7 +33,6 @@ fn host_device_kind_from_profile(profile: &[u8]) -> serde_json::Result<Option<&'
 #[cfg(target_os = "macos")]
 pub(super) async fn host_device_kind() -> Option<&'static str> {
     use std::process::Stdio;
-    use std::time::Duration;
     use tokio::process::Command;
     use tokio::sync::OnceCell;
 
@@ -40,7 +41,7 @@ pub(super) async fn host_device_kind() -> Option<&'static str> {
     HOST_DEVICE_KIND
         .get_or_try_init(|| async {
             let output = tokio::time::timeout(
-                Duration::from_secs(2),
+                HOST_DEVICE_KIND_TIMEOUT,
                 Command::new("/usr/sbin/system_profiler")
                     .args(["-detailLevel", "mini", "SPHardwareDataType", "-json"])
                     .stdin(Stdio::null())
