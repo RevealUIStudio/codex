@@ -30,10 +30,12 @@ The workflows in this directory are split so that pull requests get fast, review
   - cross-platform `argument-comment-lint`
   - Linux remote-env tests
 
-## Selected Manual Linux Tests
+## Selected Manual Platform Tests
 
 `rust-ci-full.yml` accepts optional `cargo_package` and `test_filter` dispatch
-inputs. Setting either runs selected tests on GitHub's hosted Ubuntu runner
+inputs. Setting either runs selected tests on the `selected_platform` runner:
+`linux` (the default, Ubuntu 24.04 x64), `windows` (Windows 2025 x64), or
+`macos` (macOS 15 ARM64). These are standard GitHub-hosted runners and reuse
 through the existing archive-backed nextest workflow. The inputs are passed as
 quoted arguments; they are not shell commands. This mode needs no private
 runner group or BuildBuddy secret and retains runtime test-helper setup.
@@ -47,7 +49,9 @@ Archive-backed shards upload JUnit from the remapped workspace store at
 this store is separate from the extracted binary target directory.
 
 Selected runs do not emit `Full CI results` and do not satisfy the normal full
-cross-platform gates. Leave both inputs empty for the unchanged full suite.
+cross-platform gates. Leave package and filter empty for the unchanged full
+suite; `selected_platform` is ignored in that mode. Existing normal runner
+groups, remote environments, and platform requirements continue to apply.
 
 ## Rule Of Thumb
 
