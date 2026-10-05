@@ -152,10 +152,17 @@ pub(crate) async fn resolved_managed_codex_bin(codex_bin: &Path) -> Result<PathB
 
 pub(crate) async fn managed_codex_version(codex_bin: &Path) -> Result<String> {
     let mut command = Command::new(codex_bin);
+    command.arg("--version");
+    managed_codex_version_from_command(command).await
+}
+
+// Keep command construction separate so native process fixtures exercise the
+// same output limits, deadline, and cleanup as installed Codex executables.
+async fn managed_codex_version_from_command(mut command: Command) -> Result<String> {
+    let codex_bin = PathBuf::from(command.as_std().get_program());
     #[cfg(windows)]
     command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     let mut child = command
-        .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
